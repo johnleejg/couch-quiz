@@ -172,6 +172,7 @@ const normalizeQuiz = (rawQuiz) => {
   if (!rawQuestions.length) throw new Error("Add at least one question.");
   return {
     title: String(rawQuiz?.title || "Friday Night Trivia").trim().slice(0, 60),
+    theme: rawQuiz?.theme === "cupertino" ? "cupertino" : "premium",
     questions: rawQuestions.map(normalizeQuestion),
   };
 };
@@ -187,6 +188,7 @@ const publicState = (room) => {
     code: room.code,
     joinUrl: room.joinUrl,
     title: room.quiz.title,
+    theme: room.quiz.theme,
     phase: room.phase,
     questionIndex: room.questionIndex,
     questionCount: room.quiz.questions.length,

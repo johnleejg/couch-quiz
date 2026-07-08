@@ -4,6 +4,10 @@ import QRCode from "qrcode";
 const answerColors = ["coral", "gold", "teal", "blue", "purple", "pink"];
 const timePresets = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
 const pointValues = [0, 1000, 2000];
+const themes = [
+  { id: "premium", label: "Premium" },
+  { id: "cupertino", label: "Cupertino" },
+];
 
 const createQuestion = (type = "quiz") => ({
   type,
@@ -29,6 +33,7 @@ const createQuestion = (type = "quiz") => ({
 
 const starterQuiz = {
   title: "Couch Classics",
+  theme: "premium",
   questions: [
     {
       ...createQuestion(),
@@ -52,6 +57,7 @@ const starterQuiz = {
 
 const migrateQuiz = (rawQuiz) => ({
   title: String(rawQuiz?.title || starterQuiz.title),
+  theme: rawQuiz?.theme === "cupertino" ? "cupertino" : "premium",
   questions: (Array.isArray(rawQuiz?.questions) ? rawQuiz.questions : starterQuiz.questions).map(
     (rawQuestion) => {
       const type = rawQuestion?.type === "true-false" ? "true-false" : "quiz";
@@ -109,6 +115,24 @@ function Decorations() {
   );
 }
 
+function ThemePicker({ value, onChange }) {
+  return (
+    <div className="theme-picker" role="group" aria-label="Theme">
+      {themes.map((theme) => (
+        <button
+          type="button"
+          className={value === theme.id ? "is-active" : ""}
+          aria-pressed={value === theme.id}
+          key={theme.id}
+          onClick={() => onChange(theme.id)}
+        >
+          {theme.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Timer({ value, total = 20, compact = false }) {
   const radius = compact ? 27 : 43;
   const size = compact ? 70 : 108;
@@ -117,6 +141,13 @@ function Timer({ value, total = 20, compact = false }) {
   return (
     <div className={`timer ${compact ? "timer--compact" : ""}`} aria-label={`${value} seconds left`}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <defs>
+          <linearGradient id="timer-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#4ddcff" />
+            <stop offset="55%" stopColor="#8b5cf6" />
+            <stop offset="100%" stopColor="#f43f8f" />
+          </linearGradient>
+        </defs>
         <circle className="timer__track" cx={size / 2} cy={size / 2} r={radius} />
         <circle
           className="timer__progress"
@@ -617,7 +648,7 @@ function JoinQr({ url }) {
   return dataUrl ? <img className="join-qr" src={dataUrl} alt={`QR code for ${url}`} /> : null;
 }
 
-function Host({ socket }) {
+function Host({ socket, setTheme }) {
   const [quiz, setQuiz] = useState(() => {
     try {
       const saved = localStorage.getItem("couch-quiz-draft");
@@ -652,6 +683,10 @@ function Host({ socket }) {
     localStorage.setItem("couch-quiz-draft", JSON.stringify(quiz));
   }, [quiz]);
 
+  useEffect(() => {
+    setTheme(room?.theme || quiz.theme);
+  }, [quiz.theme, room?.theme, setTheme]);
+
   const createRoom = () => {
     setError("");
     setCreating(true);
@@ -670,9 +705,15 @@ function Host({ socket }) {
       <main className="setup">
         <header className="setup__header">
           <Brand compact />
-          <a className="text-link" href="/play">
-            Join instead
-          </a>
+          <div className="setup__actions">
+            <ThemePicker
+              value={quiz.theme}
+              onChange={(theme) => setQuiz((current) => ({ ...current, theme }))}
+            />
+            <a className="text-link" href="/play">
+              Join instead
+            </a>
+          </div>
         </header>
         <section className="setup__intro">
           <div>
@@ -814,7 +855,7 @@ function Host({ socket }) {
   );
 }
 
-function Player({ socket }) {
+function Player({ socket, setTheme }) {
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const [code, setCode] = useState(() => formatCode(params.get("room") || ""));
   const [name, setName] = useState(() => localStorage.getItem("couch-quiz-name") || "");
@@ -851,6 +892,10 @@ function Player({ socket }) {
       socket.off("player:state", onPlayerState);
     };
   }, [socket]);
+
+  useEffect(() => {
+    if (room?.theme) setTheme(room.theme);
+  }, [room?.theme, setTheme]);
 
   if (!room || !player) {
     return (
@@ -1001,8 +1046,21 @@ function PlayerHeader({ player, rank }) {
 }
 
 export default function App({ socket }) {
+  const [theme, setTheme] = useState(() => localStorage.getItem("couch-quiz-theme") || "premium");
+  useEffect(() => {
+    localStorage.setItem("couch-quiz-theme", theme);
+  }, [theme]);
+
   const path = window.location.pathname;
-  if (path.startsWith("/host")) return <Host socket={socket} />;
-  if (path.startsWith("/play")) return <Player socket={socket} />;
-  return <Home />;
+  return (
+    <div className={`app-theme app-theme--${theme}`}>
+      {path.startsWith("/host") ? (
+        <Host socket={socket} setTheme={setTheme} />
+      ) : path.startsWith("/play") ? (
+        <Player socket={socket} setTheme={setTheme} />
+      ) : (
+        <Home />
+      )}
+    </div>
+  );
 }
