@@ -16,6 +16,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 5e6 });
 const rooms = new Map();
+const questionIntroSeconds = 4;
 
 fs.mkdirSync(uploadsDirectory, { recursive: true });
 
@@ -182,6 +183,111 @@ const leaderboard = (room) =>
     .sort((a, b) => b.score - a.score || a.joinedAt - b.joinedAt)
     .map(({ id, name, score, streak, online }) => ({ id, name, score, streak, online }));
 
+const withRankData = (players, previousStandings = []) => {
+  const previousById = new Map(
+    previousStandings.map((player, index) => [
+      player.id,
+      { rank: index + 1, score: player.score },
+    ]),
+  );
+  return players.map((player, index) => {
+    const previous = previousById.get(player.id) || { rank: index + 1, score: player.score };
+    return {
+      ...player,
+      rank: index + 1,
+      previousRank: previous.rank,
+      rankChange: previous.rank - (index + 1),
+      scoreBefore: previous.score,
+      pointsGained: Math.max(0, player.score - previous.score),
+    };
+  });
+};
+
+const chooseFunStat = ({ room, standings, roundResults, correctCount, answeredCount }) => {
+  const candidates = [];
+  const playerCount = room.players.size;
+  const fastest = roundResults
+    .filter((result) => result.answer)
+    .sort((a, b) => b.answer.remaining - a.answer.remaining)[0];
+  const fastestCorrect = roundResults
+    .filter((result) => result.correct && result.answer)
+    .sort((a, b) => b.answer.remaining - a.answer.remaining)[0];
+  const topStreak = standings.find((player) => player.streak >= 3);
+  const biggestClimber = standings
+    .filter((player) => player.rankChange > 0)
+    .sort((a, b) => b.rankChange - a.rankChange || b.pointsGained - a.pointsGained)[0];
+  const topRoundScore = standings
+    .filter((player) => player.pointsGained > 0)
+    .sort((a, b) => b.pointsGained - a.pointsGained)[0];
+  const leader = standings[0];
+  const second = standings[1];
+
+  if (fastest) {
+    candidates.push({
+      label: "Fastest fingers",
+      text: `${fastest.player.name} locked in with ${fastest.answer.remaining}s left.`,
+    });
+  }
+  if (fastestCorrect) {
+    candidates.push({
+      label: "Quickest correct",
+      text: `${fastestCorrect.player.name} was first to nail it.`,
+    });
+  }
+  if (topStreak) {
+    candidates.push({
+      label: "Hot streak",
+      text: `${topStreak.name} is riding a ${topStreak.streak}-answer streak.`,
+    });
+  }
+  if (correctCount === playerCount && playerCount > 1) {
+    candidates.push({
+      label: "Clean sweep",
+      text: "Everybody got it right. The couch is locked in.",
+    });
+  }
+  if (correctCount === 0 && answeredCount > 0) {
+    candidates.push({
+      label: "Stumper",
+      text: "Nobody found the right answer that round.",
+    });
+  }
+  if (correctCount === 1 && playerCount > 2) {
+    const solo = roundResults.find((result) => result.correct);
+    candidates.push({
+      label: "Solo genius",
+      text: `${solo.player.name} was the only one who got it right.`,
+    });
+  }
+  if (biggestClimber) {
+    candidates.push({
+      label: "Biggest jump",
+      text: `${biggestClimber.name} climbed ${biggestClimber.rankChange} spot${biggestClimber.rankChange === 1 ? "" : "s"}.`,
+    });
+  }
+  if (topRoundScore) {
+    candidates.push({
+      label: "Point burst",
+      text: `${topRoundScore.name} added ${topRoundScore.pointsGained.toLocaleString()} points.`,
+    });
+  }
+  if (leader && second) {
+    const gap = leader.score - second.score;
+    candidates.push({
+      label: gap <= 500 ? "Photo finish" : "Setting the pace",
+      text:
+        gap <= 500
+          ? `${second.name} is only ${gap.toLocaleString()} points behind ${leader.name}.`
+          : `${leader.name} leads by ${gap.toLocaleString()} points.`,
+    });
+  }
+
+  if (!candidates.length) {
+    return { label: "Round complete", text: "Scores are updated. Next question is waiting." };
+  }
+  return candidates[Math.floor(Math.random() * candidates.length)];
+};
+
 const publicState = (room) => {
   const question = room.quiz.questions[room.questionIndex];
   return {
@@ -193,7 +299,7 @@ const publicState = (room) => {
     questionIndex: room.questionIndex,
     questionCount: room.quiz.questions.length,
     question:
-      question && ["question", "reveal"].includes(room.phase)
+      question && ["intro", "question", "results", "leaderboard"].includes(room.phase)
         ? {
             type: question.type,
             prompt: question.prompt,
@@ -202,18 +308,18 @@ const publicState = (room) => {
             points: question.points,
             media: question.media,
             multiSelect: question.multiSelect,
-            correctIndexes: room.phase === "reveal" ? question.correctIndexes : null,
+            correctIndexes: ["results", "leaderboard"].includes(room.phase) ? question.correctIndexes : null,
           }
         : null,
     secondsLeft: room.secondsLeft,
     answeredCount: room.answers.size,
     playerCount: room.players.size,
     players: leaderboard(room),
+    roundSummary: room.roundSummary,
   };
 };
 
 const emitRoom = (room) => {
-  io.to(room.code).emit("room:state", publicState(room));
   for (const player of room.players.values()) {
     io.to(player.socketId).emit("player:state", {
       id: player.id,
@@ -224,6 +330,7 @@ const emitRoom = (room) => {
       lastResult: player.lastResult,
     });
   }
+  io.to(room.code).emit("room:state", publicState(room));
 };
 
 const sameIndexes = (left = [], right = []) => {
@@ -235,35 +342,100 @@ const sameIndexes = (left = [], right = []) => {
 const finishQuestion = (room) => {
   if (room.phase !== "question") return;
   clearInterval(room.timer);
-  room.phase = "reveal";
+  room.phase = "results";
   room.secondsLeft = 0;
   const question = room.quiz.questions[room.questionIndex];
+  const roundResults = [];
+  const answerStats = question.options.map((option, index) => ({
+    index,
+    label: option.text || `Answer ${index + 1}`,
+    count: 0,
+    correct: question.correctIndexes.includes(index),
+  }));
+  let correctCount = 0;
 
   for (const player of room.players.values()) {
     const answer = room.answers.get(player.id);
     const correct = Boolean(answer && sameIndexes(answer.indexes, question.correctIndexes));
+    let points = 0;
     if (correct) {
       player.streak += 1;
       const speedRatio = Math.max(0, answer.remaining / question.seconds);
-      const points = Math.round(question.points * (0.5 + speedRatio * 0.5));
+      points = Math.round(question.points * (0.5 + speedRatio * 0.5));
       player.score += points;
       player.lastResult = { correct: true, points };
+      correctCount += 1;
     } else {
       player.streak = 0;
       player.lastResult = { correct: false, points: 0 };
     }
+    for (const index of answer?.indexes || []) {
+      if (answerStats[index]) answerStats[index].count += 1;
+    }
+    roundResults.push({ player, answer, correct, points });
+  }
+  const responseBase = Math.max(1, room.players.size);
+  const answerStatsWithPercent = answerStats.map((item) => ({
+    ...item,
+    percent: Math.round((item.count / responseBase) * 100),
+  }));
+  const standings = withRankData(leaderboard(room), room.previousStandings);
+  const topTen = standings.slice(0, 10);
+  const topFive = standings.slice(0, 5);
+  const nextQuestionIndex =
+    room.questionIndex >= room.quiz.questions.length - 1 ? null : room.questionIndex + 1;
+  room.roundSummary = {
+    questionIndex: room.questionIndex,
+    nextQuestionIndex,
+    isFinalRound: nextQuestionIndex === null,
+    topFive,
+    topTen,
+    funStat: chooseFunStat({
+      room,
+      standings,
+      roundResults,
+      correctCount,
+      answeredCount: room.answers.size,
+    }),
+    correctCount,
+    answeredCount: room.answers.size,
+    answerStats: answerStatsWithPercent,
+  };
+  for (const player of room.players.values()) {
+    const standing = standings.find((item) => item.id === player.id);
+    const ahead = standings[standing.rank - 2] || null;
+    player.lastResult = {
+      ...player.lastResult,
+      rank: standing.rank,
+      previousRank: standing.previousRank,
+      rankChange: standing.rankChange,
+      pointsBehindNext: ahead ? Math.max(0, ahead.score - standing.score) : 0,
+      nextPlayerName: ahead?.name || null,
+    };
   }
   emitRoom(room);
 };
 
 const startQuestion = (room) => {
-  room.phase = "question";
+  clearInterval(room.timer);
+  clearTimeout(room.timer);
+  room.phase = "intro";
   room.answers = new Map();
+  room.roundSummary = null;
+  room.previousStandings = leaderboard(room);
   const question = room.quiz.questions[room.questionIndex];
   room.secondsLeft = question.seconds;
   for (const player of room.players.values()) player.lastResult = null;
   emitRoom(room);
+  room.timer = setTimeout(() => beginQuestion(room), questionIntroSeconds * 1000);
+};
 
+const beginQuestion = (room) => {
+  if (room.phase !== "intro") return;
+  room.phase = "question";
+  const question = room.quiz.questions[room.questionIndex];
+  room.secondsLeft = question.seconds;
+  emitRoom(room);
   clearInterval(room.timer);
   room.timer = setInterval(() => {
     room.secondsLeft -= 1;
@@ -333,11 +505,35 @@ io.on("connection", (socket) => {
 
   socket.on("host:reveal", ({ code }) => requireHost(socket, code, finishQuestion));
 
+  socket.on("host:end", ({ code }) =>
+    requireHost(socket, code, (room) => {
+      if (room.phase === "finished") return;
+      clearInterval(room.timer);
+      clearTimeout(room.timer);
+      room.secondsLeft = 0;
+      room.phase = "finished";
+      room.roundSummary = {
+        ...(room.roundSummary || {}),
+        topTen: withRankData(leaderboard(room), room.previousStandings || leaderboard(room)).slice(0, 10),
+      };
+      emitRoom(room);
+    }),
+  );
+
   socket.on("host:next", ({ code }) =>
     requireHost(socket, code, (room) => {
-      if (room.phase !== "reveal") return;
+      if (room.phase === "results") {
+        room.phase = "leaderboard";
+        emitRoom(room);
+        return;
+      }
+      if (room.phase !== "leaderboard") return;
       if (room.questionIndex >= room.quiz.questions.length - 1) {
         room.phase = "finished";
+        room.roundSummary = {
+          ...room.roundSummary,
+          topTen: withRankData(leaderboard(room), room.previousStandings).slice(0, 10),
+        };
         emitRoom(room);
       } else {
         room.questionIndex += 1;

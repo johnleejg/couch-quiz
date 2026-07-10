@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 
-const answerColors = ["coral", "gold", "teal", "blue", "purple", "pink"];
+const answerColors = ["red", "blue", "yellow", "green", "purple", "pink"];
 const timePresets = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
 const pointValues = [0, 1000, 2000];
+const savedQuizzesKey = "couch-quiz-saved-quizzes";
 const themes = [
   { id: "premium", label: "Premium" },
   { id: "cupertino", label: "Cupertino" },
@@ -89,11 +90,131 @@ const migrateQuiz = (rawQuiz) => ({
   ),
 });
 
+const readSavedQuizzes = () => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(savedQuizzesKey) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => ({
+        id: String(item?.id || ""),
+        title: String(item?.title || item?.quiz?.title || "Untitled quiz"),
+        savedAt: String(item?.savedAt || new Date().toISOString()),
+        quiz: migrateQuiz(item?.quiz || item),
+      }))
+      .filter((item) => item.id);
+  } catch {
+    return [];
+  }
+};
+
+const writeSavedQuizzes = (items) => {
+  localStorage.setItem(savedQuizzesKey, JSON.stringify(items));
+};
+
+const createSavedQuizId = () =>
+  window.crypto?.randomUUID?.() || `quiz-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const downloadQuizFile = (quiz) => {
+  const blob = new Blob([JSON.stringify(migrateQuiz(quiz), null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${(quiz.title || "couch-quiz").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "couch-quiz"}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+};
+
 const formatCode = (code = "") =>
   String(code)
     .replace(/\D/g, "")
     .slice(0, 6)
     .replace(/(\d{3})(?=\d)/, "$1 ");
+
+const ordinal = (value) => {
+  const number = Number(value) || 0;
+  const suffix = number % 100 >= 11 && number % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][number % 10] || "th";
+  return `${number}${suffix}`;
+};
+
+const playToneSequence = (kind, contextRef) => {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const context = contextRef.current || new AudioContext();
+    contextRef.current = context;
+    if (context.state === "suspended") context.resume();
+    const now = context.currentTime;
+    const sequences = {
+      question: [392, 523],
+      leaderboard: [523, 659, 784],
+      finished: [392, 523, 659, 880],
+    };
+    (sequences[kind] || []).forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = kind === "finished" ? "triangle" : "sine";
+      oscillator.frequency.setValueAtTime(frequency, now + index * 0.09);
+      gain.gain.setValueAtTime(0, now + index * 0.09);
+      gain.gain.linearRampToValueAtTime(0.035, now + index * 0.09 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + index * 0.09 + 0.16);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(now + index * 0.09);
+      oscillator.stop(now + index * 0.09 + 0.18);
+    });
+  } catch {
+    // Sound effects are best-effort; browsers can block audio until a user gesture.
+  }
+};
+
+function useGameSounds(phase) {
+  const audioContextRef = useRef(null);
+  const lastPhaseRef = useRef("");
+  useEffect(() => {
+    if (!phase || lastPhaseRef.current === phase) return;
+    lastPhaseRef.current = phase;
+    if (["question", "leaderboard", "finished"].includes(phase)) {
+      playToneSequence(phase, audioContextRef);
+    }
+  }, [phase]);
+}
+
+function CountUpNumber({ from = 0, to = 0, delay = 0, duration = 900 }) {
+  const [value, setValue] = useState(from);
+
+  useEffect(() => {
+    const startValue = Number(from) || 0;
+    const endValue = Number(to) || 0;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    if (reduceMotion || startValue === endValue) {
+      setValue(endValue);
+      return undefined;
+    }
+
+    let frameId = 0;
+    let timeoutId = 0;
+    const startedAt = performance.now() + delay;
+    const tick = (now) => {
+      if (now < startedAt) {
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setValue(Math.round(startValue + (endValue - startValue) * eased));
+      if (progress < 1) frameId = requestAnimationFrame(tick);
+    };
+    timeoutId = window.setTimeout(() => {
+      frameId = requestAnimationFrame(tick);
+    }, Math.max(0, delay));
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      cancelAnimationFrame(frameId);
+    };
+  }, [delay, duration, from, to]);
+
+  return value.toLocaleString();
+}
 
 function Brand({ compact = false }) {
   return (
@@ -207,6 +328,7 @@ function AnswerGrid({
   disabled,
   correctIndexes,
   player = false,
+  reveal = false,
 }) {
   const hasCorrectAnswers = Array.isArray(correctIndexes);
   return (
@@ -215,6 +337,7 @@ function AnswerGrid({
         "answer-grid",
         player ? "answer-grid--player" : "",
         options.length > 4 ? "answer-grid--dense" : "",
+        reveal ? "answer-grid--reveal" : "",
       ].join(" ")}
     >
       {options.map((option, index) => {
@@ -245,22 +368,323 @@ function AnswerGrid({
   );
 }
 
-function Leaderboard({ players, podium = false }) {
-  const sorted = players.slice(0, podium ? 3 : 5);
+function Leaderboard({
+  players,
+  podium = false,
+  animated = false,
+  limit = podium ? 3 : 5,
+  showRoundGain = false,
+  countScores = false,
+  animateMovement = false,
+}) {
+  const sorted = players.slice(0, limit);
   return (
-    <div className={`leaderboard ${podium ? "leaderboard--podium" : ""}`}>
+    <div
+      className={[
+        "leaderboard",
+        podium ? "leaderboard--podium" : "",
+        animated ? "leaderboard--animated" : "",
+        animateMovement ? "leaderboard--shuffle" : "",
+      ].join(" ")}
+    >
       {sorted.map((player, index) => (
-        <div className="leaderboard__row" key={player.id}>
-          <span className="leaderboard__rank">{index + 1}</span>
+        <div
+          className="leaderboard__row"
+          key={player.id}
+          style={{
+            "--rank-index": index,
+            "--rank-change": Number(player.rankChange) || 0,
+          }}
+        >
+          <span className="leaderboard__rank">{player.rank || index + 1}</span>
           <span className="leaderboard__name">
             {player.name}
             {!player.online && !podium ? <em>offline</em> : null}
           </span>
-          <strong>{player.score.toLocaleString()}</strong>
+          {showRoundGain && Number.isFinite(player.rankChange) && player.rankChange !== 0 ? (
+            <span className={`leaderboard__delta ${player.rankChange > 0 ? "is-up" : "is-down"}`}>
+              {player.rankChange > 0 ? "↑" : "↓"} {Math.abs(player.rankChange)}
+            </span>
+          ) : null}
+          {showRoundGain ? (
+            <span className={`leaderboard__gain ${Number(player.pointsGained) > 0 ? "has-points" : ""}`}>
+              +{(Number(player.pointsGained) || 0).toLocaleString()}
+            </span>
+          ) : null}
+          <strong className="leaderboard__score">
+            {countScores ? (
+              <CountUpNumber
+                from={
+                  Number.isFinite(Number(player.scoreBefore))
+                    ? Number(player.scoreBefore)
+                    : Number(player.score) || 0
+                }
+                to={Number(player.score) || 0}
+                delay={260 + index * 95}
+              />
+            ) : (
+              player.score.toLocaleString()
+            )}
+          </strong>
         </div>
       ))}
       {!sorted.length ? <p className="empty-copy">Waiting for the first player...</p> : null}
     </div>
+  );
+}
+
+function EndQuizButton({ room, socket }) {
+  if (!room || ["finished"].includes(room.phase)) return null;
+  return (
+    <button className="button button--danger button--compact" onClick={() => socket.emit("host:end", { code: room.code })}>
+      End quiz
+    </button>
+  );
+}
+
+function RoundLeaderboard({ room, onNext, socket }) {
+  const summary = room.roundSummary;
+  const players = summary?.topFive?.length ? summary.topFive : room.players.slice(0, 5);
+  const isFinalRound = summary?.isFinalRound || room.questionIndex >= room.questionCount - 1;
+  return (
+    <main className="host-stage host-stage--leaderboard">
+      <Decorations />
+      <header className="stage-header">
+        <Brand compact />
+        <div className="question-count">
+          Round <strong>{room.questionIndex + 1}</strong> / {room.questionCount}
+          <span>Leaderboard</span>
+        </div>
+        <div className="room-code room-code--small">
+          <span>ROOM</span>
+          <strong>{formatCode(room.code)}</strong>
+        </div>
+        <EndQuizButton room={room} socket={socket} />
+      </header>
+      <section className="round-results">
+        <div className="round-results__intro">
+          <span className="section-label">TOP 5</span>
+          {summary?.funStat ? (
+            <aside className="fun-stat">
+              <span>{summary.funStat.label}</span>
+              <strong>{summary.funStat.text}</strong>
+            </aside>
+          ) : null}
+        </div>
+        <Leaderboard players={players} animated animateMovement showRoundGain countScores limit={5} />
+        <button className="button button--primary button--huge" onClick={onNext}>
+          {isFinalRound ? "Reveal final podium" : "Next question"}
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function HostQuestionIntro({ room, question, socket }) {
+  return (
+    <main className="host-stage host-stage--intro">
+      <Decorations />
+      <header className="stage-header">
+        <Brand compact />
+        <div className="question-count">
+          Question <strong>{room.questionIndex + 1}</strong> / {room.questionCount}
+          <span>Read first</span>
+        </div>
+        <div className="room-code room-code--small">
+          <span>ROOM</span>
+          <strong>{formatCode(room.code)}</strong>
+        </div>
+        <EndQuizButton room={room} socket={socket} />
+      </header>
+      <section className="question-intro-card">
+        <span className="section-label">QUESTION</span>
+        <h1>{question.prompt}</h1>
+        <p>Answers unlock in a moment.</p>
+      </section>
+    </main>
+  );
+}
+
+function QuestionResults({ room, question, onNext, socket }) {
+  const stats = room.roundSummary?.answerStats || [];
+  const responseTotal = Math.max(1, room.playerCount);
+  return (
+    <main className="host-stage host-stage--results">
+      <Decorations />
+      <header className="stage-header">
+        <Brand compact />
+        <div className="question-count">
+          Question <strong>{room.questionIndex + 1}</strong> / {room.questionCount}
+          <span>Results</span>
+        </div>
+        <div className="room-code room-code--small">
+          <span>ROOM</span>
+          <strong>{formatCode(room.code)}</strong>
+        </div>
+        <EndQuizButton room={room} socket={socket} />
+      </header>
+      <section className={`question-board question-board--results ${question.media ? "question-board--with-media" : ""}`}>
+        <div className="question-board__heading">
+          <div className="result-badge">
+            <strong>{room.roundSummary?.correctCount || 0}</strong>
+            <span>correct</span>
+          </div>
+          <div className="question-board__content">
+            <h1>{question.prompt}</h1>
+            <QuestionMedia media={question.media} />
+            <div className="answer-stats" aria-label="Answer selections">
+              {question.options.map((option, index) => {
+                const stat = stats.find((item) => item.index === index) || { count: 0, percent: 0 };
+                const percent = Math.round((stat.count / responseTotal) * 100);
+                return (
+                  <div className="answer-stat" key={`${option.text}-${index}`}>
+                    <div className="answer-stat__track">
+                      <i style={{ "--answer-percent": `${percent}%` }} />
+                    </div>
+                    <span className={`answer-stat__marker answer-stat__marker--${answerColors[index % answerColors.length]}`}>
+                      {String.fromCharCode(65 + index)}
+                    </span>
+                    <strong>{stat.count}</strong>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        <AnswerGrid options={question.options} disabled correctIndexes={question.correctIndexes} reveal />
+      </section>
+      <footer className="stage-footer">
+        <div className="answered-count">
+          <strong>
+            {room.answeredCount} of {room.playerCount}
+          </strong>
+          <span>answered</span>
+        </div>
+        <button className="button button--primary" onClick={onNext}>
+          Show leaderboard
+        </button>
+      </footer>
+    </main>
+  );
+}
+
+function questionTitleSizeClass(prompt = "") {
+  const cleanPrompt = prompt.trim();
+  const promptLength = cleanPrompt.length;
+  const wordCount = cleanPrompt ? cleanPrompt.split(/\s+/).length : 0;
+  if (promptLength > 96 || wordCount > 16) return "question-board__title--xl";
+  if (promptLength > 70 || wordCount > 12) return "question-board__title--long";
+  if (promptLength > 42 || wordCount > 7) return "question-board__title--compact";
+  return "";
+}
+
+function FinalPodium({ players, onRestart }) {
+  const topTen = players.slice(0, 10);
+  const podium = [topTen[2], topTen[1], topTen[0]].filter(Boolean);
+  const remainingPlayers = topTen.slice(3);
+  return (
+    <main className="host-stage host-stage--finished">
+      <Decorations />
+      <Brand compact />
+      <section className="podium">
+        <p className="section-label">FINAL SCORES</p>
+        <h1>Make some noise for the couch champions.</h1>
+        <div className="podium__top-three">
+          {podium.map((player) => (
+            <article className={`podium-card podium-card--rank-${player.rank}`} key={player.id}>
+              <span>{ordinal(player.rank)}</span>
+              <strong>{player.name}</strong>
+              <em>{player.score.toLocaleString()} pts</em>
+            </article>
+          ))}
+        </div>
+        {remainingPlayers.length ? (
+          <section className="podium__next-seven" aria-label="Final leaderboard places 4 through 10">
+            <span className="section-label">NEXT 7</span>
+            <Leaderboard players={remainingPlayers} animated limit={7} />
+          </section>
+        ) : null}
+        <button className="button button--light" onClick={onRestart}>
+          Make another quiz
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function PlayerRoundSummary({ room, player, rank }) {
+  const result = player.lastResult;
+  const behind = result?.pointsBehindNext || 0;
+  return (
+    <main className={`player-screen player-screen--leaderboard`}>
+      <Decorations />
+      <PlayerHeader player={player} rank={rank} />
+      <section className="player-round-summary">
+        <span className="section-label">ROUND COMPLETE</span>
+        <h1>
+          {result?.correct
+            ? `Correct! +${result.points.toLocaleString()}`
+            : result
+              ? "Not this time"
+              : "Scores are in"}
+        </h1>
+        <div className="player-place-card">
+          <span>Current place</span>
+          <strong>#{rank || result?.rank || "–"}</strong>
+          {rank <= 1 ? (
+            <p>You’re leading the room.</p>
+          ) : !behind ? (
+            <p>You’re tied with {result?.nextPlayerName || "the next player"}.</p>
+          ) : (
+            <p>
+              {result?.nextPlayerName || "The next player"} is {behind.toLocaleString()} point
+              {behind === 1 ? "" : "s"} ahead.
+            </p>
+          )}
+        </div>
+        {room.roundSummary?.funStat ? (
+          <aside className="fun-stat fun-stat--player">
+            <span>{room.roundSummary.funStat.label}</span>
+            <strong>{room.roundSummary.funStat.text}</strong>
+          </aside>
+        ) : null}
+        <p className="player-question__prompt">Look up at the host screen for the top 5.</p>
+      </section>
+    </main>
+  );
+}
+
+function PlayerIntro({ room, player, rank }) {
+  return (
+    <main className="player-screen player-screen--intro">
+      <Decorations />
+      <PlayerHeader player={player} rank={rank} />
+      <section className="waiting-card waiting-card--intro">
+        <span className="section-label">QUESTION {room.questionIndex + 1}</span>
+        <h1>Read the question on the big screen.</h1>
+        <p>Your answer buttons will appear in a moment.</p>
+      </section>
+    </main>
+  );
+}
+
+function PlayerResult({ room, player, rank }) {
+  const hasResult = Boolean(player.lastResult);
+  const correct = Boolean(player.lastResult?.correct);
+  return (
+    <main className={`player-screen player-screen--result ${hasResult ? (correct ? "is-correct" : "is-wrong") : "is-pending"}`}>
+      <Decorations />
+      <PlayerHeader player={player} rank={rank} />
+      <section className="player-result-card">
+        <span className="player-result-card__mark">✓</span>
+        <h1>{hasResult ? (correct ? "Correct!" : "Incorrect") : "Result"}</h1>
+        <p>
+          {correct
+            ? `+${(player.lastResult?.points || 0).toLocaleString()} points`
+            : "Look up to see the right answer."}
+        </p>
+      </section>
+    </main>
   );
 }
 
@@ -638,6 +1062,114 @@ function QuestionEditor({ quiz, setQuiz }) {
   );
 }
 
+function QuizLibrary({ quiz, onLoad }) {
+  const [savedQuizzes, setSavedQuizzes] = useState(() => readSavedQuizzes());
+  const [notice, setNotice] = useState("");
+  const importInputRef = useRef(null);
+
+  const persist = (items) => {
+    setSavedQuizzes(items);
+    writeSavedQuizzes(items);
+  };
+
+  const saveCurrentQuiz = () => {
+    const savedQuiz = {
+      id: createSavedQuizId(),
+      title: quiz.title?.trim() || "Untitled quiz",
+      savedAt: new Date().toISOString(),
+      quiz: migrateQuiz(quiz),
+    };
+    persist([savedQuiz, ...savedQuizzes].slice(0, 30));
+    setNotice(`Saved “${savedQuiz.title}”.`);
+  };
+
+  const loadSavedQuiz = (item) => {
+    onLoad(migrateQuiz(item.quiz));
+    setNotice(`Loaded “${item.title}”.`);
+  };
+
+  const deleteSavedQuiz = (id) => {
+    persist(savedQuizzes.filter((item) => item.id !== id));
+    setNotice("Saved quiz removed.");
+  };
+
+  const importQuiz = async (file) => {
+    if (!file) return;
+    try {
+      const importedQuiz = migrateQuiz(JSON.parse(await file.text()));
+      const savedQuiz = {
+        id: createSavedQuizId(),
+        title: importedQuiz.title || file.name.replace(/\.json$/i, "") || "Imported quiz",
+        savedAt: new Date().toISOString(),
+        quiz: importedQuiz,
+      };
+      persist([savedQuiz, ...savedQuizzes].slice(0, 30));
+      onLoad(importedQuiz);
+      setNotice(`Imported and loaded “${savedQuiz.title}”.`);
+    } catch {
+      setNotice("That file could not be imported. Use a Couch Quiz JSON export.");
+    } finally {
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
+  };
+
+  return (
+    <section className="quiz-library" aria-label="Saved quizzes">
+      <div className="quiz-library__header">
+        <div>
+          <span className="section-label">QUIZ LIBRARY</span>
+          <h2>Save and load quizzes</h2>
+          <p>Saved quizzes live on this device. Export a JSON file if you want to move one elsewhere.</p>
+        </div>
+        <div className="quiz-library__actions">
+          <button className="button button--outline" type="button" onClick={saveCurrentQuiz}>
+            Save current
+          </button>
+          <button className="button button--outline" type="button" onClick={() => downloadQuizFile(quiz)}>
+            Export JSON
+          </button>
+          <label className="button button--outline quiz-library__import">
+            Import JSON
+            <input
+              ref={importInputRef}
+              type="file"
+              accept="application/json,.json"
+              onChange={(event) => importQuiz(event.target.files?.[0])}
+            />
+          </label>
+        </div>
+      </div>
+      {notice ? <p className="quiz-library__notice">{notice}</p> : null}
+      {savedQuizzes.length ? (
+        <div className="quiz-library__list">
+          {savedQuizzes.map((item) => (
+            <article className="quiz-library__item" key={item.id}>
+              <div>
+                <strong>{item.title}</strong>
+                <span>
+                  {item.quiz.questions.length} question{item.quiz.questions.length === 1 ? "" : "s"} · saved{" "}
+                  {new Date(item.savedAt).toLocaleDateString()}
+                </span>
+              </div>
+              <button className="text-button" type="button" onClick={() => loadSavedQuiz(item)}>
+                Load
+              </button>
+              <button className="text-button" type="button" onClick={() => downloadQuizFile(item.quiz)}>
+                Export
+              </button>
+              <button className="text-button text-button--danger" type="button" onClick={() => deleteSavedQuiz(item.id)}>
+                Delete
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="quiz-library__empty">No saved quizzes yet.</p>
+      )}
+    </section>
+  );
+}
+
 function JoinQr({ url }) {
   const [dataUrl, setDataUrl] = useState("");
   useEffect(() => {
@@ -660,6 +1192,7 @@ function Host({ socket, setTheme }) {
   const [room, setRoom] = useState(null);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  useGameSounds(room?.phase);
 
   useEffect(() => {
     const onRoomState = (nextRoom) => setRoom(nextRoom);
@@ -725,6 +1258,7 @@ function Host({ socket, setTheme }) {
             <span>questions</span>
           </div>
         </section>
+        <QuizLibrary quiz={quiz} onLoad={setQuiz} />
         <QuestionEditor quiz={quiz} setQuiz={setQuiz} />
         <footer className="setup__footer">
           {error ? <p className="error">{error}</p> : <span />}
@@ -781,27 +1315,31 @@ function Host({ socket, setTheme }) {
   }
 
   if (room.phase === "finished") {
+    const finalPlayers = room.roundSummary?.topTen?.length ? room.roundSummary.topTen : room.players;
     return (
-      <main className="host-stage host-stage--finished">
-        <Decorations />
-        <Brand compact />
-        <section className="podium">
-          <p className="section-label">FINAL SCORES</p>
-          <h1>Make some noise for the couch champions.</h1>
-          <Leaderboard players={room.players} podium />
-          <button
-            className="button button--light"
-            onClick={() => {
-              localStorage.removeItem("couch-quiz-host");
-              window.location.reload();
-            }}
-          >
-            Make another quiz
-          </button>
-        </section>
-      </main>
+      <FinalPodium
+        players={finalPlayers}
+        onRestart={() => {
+          localStorage.removeItem("couch-quiz-host");
+          window.location.reload();
+        }}
+      />
     );
   }
+
+  if (room.phase === "leaderboard") {
+    return <RoundLeaderboard room={room} socket={socket} onNext={() => socket.emit("host:next", { code: room.code })} />;
+  }
+
+  if (room.phase === "intro") {
+    return <HostQuestionIntro room={room} question={currentQuestion} socket={socket} />;
+  }
+
+  if (room.phase === "results") {
+    return <QuestionResults room={room} question={currentQuestion} socket={socket} onNext={() => socket.emit("host:next", { code: room.code })} />;
+  }
+
+  const promptSizeClass = questionTitleSizeClass(currentQuestion.prompt);
 
   return (
     <main className={`host-stage host-stage--${room.phase}`}>
@@ -816,6 +1354,7 @@ function Host({ socket, setTheme }) {
           <span>ROOM</span>
           <strong>{formatCode(room.code)}</strong>
         </div>
+        <EndQuizButton room={room} socket={socket} />
       </header>
       <section className="score-strip">
         <Leaderboard players={room.players} />
@@ -824,7 +1363,7 @@ function Host({ socket, setTheme }) {
         <div className="question-board__heading">
           <Timer value={room.secondsLeft} total={currentQuestion.seconds} />
           <div className="question-board__content">
-            <h1>{currentQuestion.prompt}</h1>
+            <h1 className={promptSizeClass}>{currentQuestion.prompt}</h1>
             <QuestionMedia media={currentQuestion.media} />
           </div>
         </div>
@@ -843,7 +1382,7 @@ function Host({ socket, setTheme }) {
         </div>
         {room.phase === "question" ? (
           <button className="button button--light" onClick={() => socket.emit("host:reveal", { code: room.code })}>
-            Reveal now
+            Show results now
           </button>
         ) : (
           <button className="button button--primary" onClick={() => socket.emit("host:next", { code: room.code })}>
@@ -864,6 +1403,7 @@ function Player({ socket, setTheme }) {
   const [error, setError] = useState("");
   const [joining, setJoining] = useState(false);
   const [pendingIndexes, setPendingIndexes] = useState([]);
+  useGameSounds(room?.phase);
 
   useEffect(() => {
     setPendingIndexes([]);
@@ -971,7 +1511,18 @@ function Player({ socket, setTheme }) {
     );
   }
 
-  const isReveal = room.phase === "reveal";
+  if (room.phase === "leaderboard") {
+    return <PlayerRoundSummary room={room} player={player} rank={rank} />;
+  }
+
+  if (room.phase === "intro") {
+    return <PlayerIntro room={room} player={player} rank={rank} />;
+  }
+
+  if (room.phase === "results") {
+    return <PlayerResult room={room} player={player} rank={rank} />;
+  }
+
   const locked = Array.isArray(player.selectedIndexes);
   const selectedIndexes = locked ? player.selectedIndexes : pendingIndexes;
 
@@ -993,11 +1544,7 @@ function Player({ socket, setTheme }) {
       <section className="player-question">
         <Timer value={room.secondsLeft} total={room.question.seconds} compact />
         <p className="player-question__prompt">
-          {isReveal
-            ? player.lastResult?.correct
-              ? `Correct! +${player.lastResult.points}`
-              : "Not this time"
-            : locked
+          {locked
               ? "Answer locked!"
               : room.question.multiSelect
                 ? "Select all that apply"
@@ -1007,11 +1554,11 @@ function Player({ socket, setTheme }) {
           options={room.question.options}
           selectedIndexes={selectedIndexes}
           correctIndexes={room.question.correctIndexes}
-          disabled={locked || isReveal}
+          disabled={locked}
           player
           onSelect={selectAnswer}
         />
-        {room.question.multiSelect && !locked && !isReveal ? (
+        {room.question.multiSelect && !locked ? (
           <button
             className="button button--primary player-submit"
             disabled={!pendingIndexes.length}
@@ -1019,12 +1566,6 @@ function Player({ socket, setTheme }) {
           >
             Lock in {pendingIndexes.length || ""} answer{pendingIndexes.length === 1 ? "" : "s"}
           </button>
-        ) : null}
-        {isReveal ? (
-          <div className="player-result">
-            <strong>{player.streak ? `${player.streak} answer streak` : "Next one is yours"}</strong>
-            <span>Look up for the leaderboard</span>
-          </div>
         ) : null}
       </section>
     </main>
