@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 
 const answerColors = ["red", "blue", "yellow", "green", "purple", "pink"];
@@ -136,46 +136,95 @@ const ordinal = (value) => {
   return `${number}${suffix}`;
 };
 
-const playToneSequence = (kind, contextRef) => {
-  try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-    const context = contextRef.current || new AudioContext();
-    contextRef.current = context;
-    if (context.state === "suspended") context.resume();
-    const now = context.currentTime;
-    const sequences = {
-      question: [392, 523],
-      leaderboard: [523, 659, 784],
-      finished: [392, 523, 659, 880],
-    };
-    (sequences[kind] || []).forEach((frequency, index) => {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = kind === "finished" ? "triangle" : "sine";
-      oscillator.frequency.setValueAtTime(frequency, now + index * 0.09);
-      gain.gain.setValueAtTime(0, now + index * 0.09);
-      gain.gain.linearRampToValueAtTime(0.035, now + index * 0.09 + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + index * 0.09 + 0.16);
-      oscillator.connect(gain).connect(context.destination);
-      oscillator.start(now + index * 0.09);
-      oscillator.stop(now + index * 0.09 + 0.18);
-    });
-  } catch {
-    // Sound effects are best-effort; browsers can block audio until a user gesture.
-  }
+const gameAudioSources = {
+  waiting: "/audio/waiting.mp3",
+  gong: "/audio/gong.mp3",
+  during: ["/audio/during-1.mp3", "/audio/during-2.wav", "/audio/during-3.wav"],
 };
 
-function useGameSounds(phase) {
-  const audioContextRef = useRef(null);
+const stopAudio = (audio) => {
+  if (!audio) return;
+  audio.pause();
+  audio.currentTime = 0;
+};
+
+function useHostGameAudio(phase) {
+  const tracksRef = useRef(null);
   const lastPhaseRef = useRef("");
+
+  const ensureTracks = useCallback(() => {
+    if (tracksRef.current) return tracksRef.current;
+    const waiting = new Audio(gameAudioSources.waiting);
+    const gong = new Audio(gameAudioSources.gong);
+    waiting.loop = true;
+    waiting.volume = 0.34;
+    gong.volume = 0.72;
+    tracksRef.current = { waiting, gong, during: null };
+    return tracksRef.current;
+  }, []);
+
+  const primeAudio = useCallback(() => {
+    // Prime every supplied track from a host button press so later timed transitions can play.
+    [gameAudioSources.waiting, gameAudioSources.gong, ...gameAudioSources.during].forEach((source) => {
+      const audio = new Audio(source);
+      audio.muted = true;
+      audio.play().catch(() => undefined).finally(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = false;
+      });
+    });
+  }, []);
+
   useEffect(() => {
     if (!phase || lastPhaseRef.current === phase) return;
     lastPhaseRef.current = phase;
-    if (["question", "leaderboard", "finished"].includes(phase)) {
-      playToneSequence(phase, audioContextRef);
+    const tracks = ensureTracks();
+
+    if (phase === "lobby" || phase === "finished") {
+      stopAudio(tracks.during);
+      stopAudio(tracks.gong);
+      tracks.waiting.play().catch(() => undefined);
+      return;
     }
-  }, [phase]);
+
+    if (phase === "question") {
+      stopAudio(tracks.waiting);
+      stopAudio(tracks.gong);
+      stopAudio(tracks.during);
+      const source = gameAudioSources.during[Math.floor(Math.random() * gameAudioSources.during.length)];
+      const during = new Audio(source);
+      during.loop = true;
+      during.volume = 0.42;
+      tracks.during = during;
+      during.play().catch(() => undefined);
+      return;
+    }
+
+    if (phase === "results") {
+      stopAudio(tracks.waiting);
+      stopAudio(tracks.during);
+      tracks.gong.currentTime = 0;
+      tracks.gong.play().catch(() => undefined);
+      return;
+    }
+
+    stopAudio(tracks.waiting);
+    stopAudio(tracks.during);
+  }, [ensureTracks, phase]);
+
+  useEffect(
+    () => () => {
+      const tracks = tracksRef.current;
+      if (!tracks) return;
+      stopAudio(tracks.waiting);
+      stopAudio(tracks.during);
+      stopAudio(tracks.gong);
+    },
+    [],
+  );
+
+  return primeAudio;
 }
 
 function CountUpNumber({ from = 0, to = 0, delay = 0, duration = 900 }) {
@@ -329,6 +378,7 @@ function AnswerGrid({
   correctIndexes,
   player = false,
   reveal = false,
+  showImages = true,
 }) {
   const hasCorrectAnswers = Array.isArray(correctIndexes);
   return (
@@ -341,6 +391,7 @@ function AnswerGrid({
       ].join(" ")}
     >
       {options.map((option, index) => {
+        const showImage = showImages && Boolean(option.imageUrl);
         const selected = selectedIndexes.includes(index);
         const correct = hasCorrectAnswers && correctIndexes.includes(index);
         const wrongSelection = hasCorrectAnswers && selected && !correct;
@@ -349,7 +400,7 @@ function AnswerGrid({
             className={[
               "answer",
               `answer--${answerColors[index % answerColors.length]}`,
-              option.imageUrl ? "answer--with-image" : "",
+              showImage ? "answer--with-image" : "",
               selected ? "is-selected" : "",
               correct ? "is-correct" : "",
               wrongSelection ? "is-wrong" : "",
@@ -359,7 +410,7 @@ function AnswerGrid({
             onClick={() => onSelect?.(index)}
           >
             <span className="answer__marker">{String.fromCharCode(65 + index)}</span>
-            {option.imageUrl ? <img src={option.imageUrl} alt="" /> : null}
+            {showImage ? <img src={option.imageUrl} alt="" /> : null}
             {option.text ? <span>{option.text}</span> : <span className="answer__image-label">Image answer</span>}
           </button>
         );
@@ -480,6 +531,33 @@ function RoundLeaderboard({ room, onNext, socket }) {
   );
 }
 
+function HostDoublePoints({ room, socket }) {
+  return (
+    <main className="host-stage host-stage--bonus">
+      <Decorations />
+      <header className="stage-header">
+        <Brand compact />
+        <div className="question-count">
+          Question <strong>{room.questionIndex + 1}</strong> / {room.questionCount}
+          <span>Double points</span>
+        </div>
+        <div className="room-code room-code--small">
+          <span>ROOM</span>
+          <strong>{formatCode(room.code)}</strong>
+        </div>
+        <EndQuizButton room={room} socket={socket} />
+      </header>
+      <section className="question-intro-card question-intro-card--double">
+        <div className="double-points" aria-label="Double points question">
+          <span>2×</span>
+          <h1>Double Points</h1>
+          <p>This question is worth 2,000 points.</p>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 function HostQuestionIntro({ room, question, socket }) {
   return (
     <main className="host-stage host-stage--intro">
@@ -551,7 +629,7 @@ function QuestionResults({ room, question, onNext, socket }) {
             </div>
           </div>
         </div>
-        <AnswerGrid options={question.options} disabled correctIndexes={question.correctIndexes} reveal />
+        <AnswerGrid options={question.options} disabled correctIndexes={question.correctIndexes} reveal showImages={false} />
       </section>
       <footer className="stage-footer">
         <div className="answered-count">
@@ -561,7 +639,7 @@ function QuestionResults({ room, question, onNext, socket }) {
           <span>answered</span>
         </div>
         <button className="button button--primary" onClick={onNext}>
-          Show leaderboard
+          {room.roundSummary?.isFinalRound ? "Show final podium" : "Show leaderboard"}
         </button>
       </footer>
     </main>
@@ -654,15 +732,15 @@ function PlayerRoundSummary({ room, player, rank }) {
   );
 }
 
-function PlayerIntro({ room, player, rank }) {
+function PlayerIntro({ room, player, rank, isDoublePoints = false }) {
   return (
-    <main className="player-screen player-screen--intro">
+    <main className={`player-screen player-screen--${isDoublePoints ? "bonus" : "intro"}`}>
       <Decorations />
       <PlayerHeader player={player} rank={rank} />
       <section className="waiting-card waiting-card--intro">
-        <span className="section-label">QUESTION {room.questionIndex + 1}</span>
-        <h1>Read the question on the big screen.</h1>
-        <p>Your answer buttons will appear in a moment.</p>
+        <span className="section-label">{isDoublePoints ? "DOUBLE POINTS" : `QUESTION ${room.questionIndex + 1}`}</span>
+        <h1>{isDoublePoints ? "This one is worth 2,000 points." : "Read the question on the big screen."}</h1>
+        <p>{isDoublePoints ? "The question is coming up next." : "Your answer buttons will appear in a moment."}</p>
       </section>
     </main>
   );
@@ -1192,7 +1270,7 @@ function Host({ socket, setTheme }) {
   const [room, setRoom] = useState(null);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
-  useGameSounds(room?.phase);
+  const primeAudio = useHostGameAudio(room?.phase);
 
   useEffect(() => {
     const onRoomState = (nextRoom) => setRoom(nextRoom);
@@ -1221,6 +1299,7 @@ function Host({ socket, setTheme }) {
   }, [quiz.theme, room?.theme, setTheme]);
 
   const createRoom = () => {
+    primeAudio();
     setError("");
     setCreating(true);
     socket.emit("host:create", quiz, (response) => {
@@ -1304,7 +1383,10 @@ function Host({ socket, setTheme }) {
             <button
               className="button button--primary button--huge"
               disabled={!room.players.length}
-              onClick={() => socket.emit("host:start", { code: room.code })}
+              onClick={() => {
+                primeAudio();
+                socket.emit("host:start", { code: room.code });
+              }}
             >
               Start the quiz
             </button>
@@ -1329,6 +1411,10 @@ function Host({ socket, setTheme }) {
 
   if (room.phase === "leaderboard") {
     return <RoundLeaderboard room={room} socket={socket} onNext={() => socket.emit("host:next", { code: room.code })} />;
+  }
+
+  if (room.phase === "bonus") {
+    return <HostDoublePoints room={room} socket={socket} />;
   }
 
   if (room.phase === "intro") {
@@ -1403,7 +1489,6 @@ function Player({ socket, setTheme }) {
   const [error, setError] = useState("");
   const [joining, setJoining] = useState(false);
   const [pendingIndexes, setPendingIndexes] = useState([]);
-  useGameSounds(room?.phase);
 
   useEffect(() => {
     setPendingIndexes([]);
@@ -1513,6 +1598,10 @@ function Player({ socket, setTheme }) {
 
   if (room.phase === "leaderboard") {
     return <PlayerRoundSummary room={room} player={player} rank={rank} />;
+  }
+
+  if (room.phase === "bonus") {
+    return <PlayerIntro room={room} player={player} rank={rank} isDoublePoints />;
   }
 
   if (room.phase === "intro") {

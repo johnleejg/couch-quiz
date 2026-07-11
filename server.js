@@ -17,6 +17,7 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 5e6 });
 const rooms = new Map();
 const questionIntroSeconds = 4;
+const doublePointsIntroSeconds = 3;
 
 fs.mkdirSync(uploadsDirectory, { recursive: true });
 
@@ -299,7 +300,7 @@ const publicState = (room) => {
     questionIndex: room.questionIndex,
     questionCount: room.quiz.questions.length,
     question:
-      question && ["intro", "question", "results", "leaderboard"].includes(room.phase)
+      question && ["bonus", "intro", "question", "results", "leaderboard"].includes(room.phase)
         ? {
             type: question.type,
             prompt: question.prompt,
@@ -419,13 +420,26 @@ const finishQuestion = (room) => {
 const startQuestion = (room) => {
   clearInterval(room.timer);
   clearTimeout(room.timer);
-  room.phase = "intro";
   room.answers = new Map();
   room.roundSummary = null;
   room.previousStandings = leaderboard(room);
   const question = room.quiz.questions[room.questionIndex];
+  room.phase = question.points === 2000 ? "bonus" : "intro";
   room.secondsLeft = question.seconds;
   for (const player of room.players.values()) player.lastResult = null;
+  emitRoom(room);
+  room.timer = setTimeout(
+    () => {
+      if (room.phase === "bonus") showQuestionIntro(room);
+      else beginQuestion(room);
+    },
+    question.points === 2000 ? doublePointsIntroSeconds * 1000 : questionIntroSeconds * 1000,
+  );
+};
+
+const showQuestionIntro = (room) => {
+  if (room.phase !== "bonus") return;
+  room.phase = "intro";
   emitRoom(room);
   room.timer = setTimeout(() => beginQuestion(room), questionIntroSeconds * 1000);
 };
@@ -523,6 +537,15 @@ io.on("connection", (socket) => {
   socket.on("host:next", ({ code }) =>
     requireHost(socket, code, (room) => {
       if (room.phase === "results") {
+        if (room.questionIndex >= room.quiz.questions.length - 1) {
+          room.phase = "finished";
+          room.roundSummary = {
+            ...room.roundSummary,
+            topTen: withRankData(leaderboard(room), room.previousStandings).slice(0, 10),
+          };
+          emitRoom(room);
+          return;
+        }
         room.phase = "leaderboard";
         emitRoom(room);
         return;
@@ -597,7 +620,7 @@ io.on("connection", (socket) => {
     });
     emitRoom(room);
     if (room.answers.size === room.players.size) {
-      setTimeout(() => finishQuestion(room), 450);
+      finishQuestion(room);
     }
   });
 
