@@ -5,10 +5,6 @@ const answerColors = ["red", "blue", "yellow", "green", "purple", "pink"];
 const timePresets = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
 const pointValues = [0, 1000, 2000];
 const savedQuizzesKey = "couch-quiz-saved-quizzes";
-const themes = [
-  { id: "premium", label: "Premium" },
-  { id: "cupertino", label: "Cupertino" },
-];
 
 const createQuestion = (type = "quiz") => ({
   type,
@@ -34,7 +30,6 @@ const createQuestion = (type = "quiz") => ({
 
 const starterQuiz = {
   title: "Couch Classics",
-  theme: "premium",
   questions: [
     {
       ...createQuestion(),
@@ -58,7 +53,6 @@ const starterQuiz = {
 
 const migrateQuiz = (rawQuiz) => ({
   title: String(rawQuiz?.title || starterQuiz.title),
-  theme: rawQuiz?.theme === "cupertino" ? "cupertino" : "premium",
   questions: (Array.isArray(rawQuiz?.questions) ? rawQuiz.questions : starterQuiz.questions).map(
     (rawQuestion) => {
       const type = rawQuestion?.type === "true-false" ? "true-false" : "quiz";
@@ -134,6 +128,13 @@ const ordinal = (value) => {
   const number = Number(value) || 0;
   const suffix = number % 100 >= 11 && number % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][number % 10] || "th";
   return `${number}${suffix}`;
+};
+
+const podiumNameSizeClass = (name = "") => {
+  const length = [...String(name)].length;
+  if (length > 12) return "podium-card__name--compact";
+  if (length > 8) return "podium-card__name--long";
+  return "";
 };
 
 const gameAudioSources = {
@@ -281,24 +282,6 @@ function Decorations() {
       <i className="shape shape--bolt" />
       <i className="shape shape--star">✦</i>
       <i className="shape shape--zig">M</i>
-    </div>
-  );
-}
-
-function ThemePicker({ value, onChange }) {
-  return (
-    <div className="theme-picker" role="group" aria-label="Theme">
-      {themes.map((theme) => (
-        <button
-          type="button"
-          className={value === theme.id ? "is-active" : ""}
-          aria-pressed={value === theme.id}
-          key={theme.id}
-          onClick={() => onChange(theme.id)}
-        >
-          {theme.label}
-        </button>
-      ))}
     </div>
   );
 }
@@ -671,7 +654,7 @@ function FinalPodium({ players, onRestart }) {
           {podium.map((player) => (
             <article className={`podium-card podium-card--rank-${player.rank}`} key={player.id}>
               <span>{ordinal(player.rank)}</span>
-              <strong>{player.name}</strong>
+              <strong className={podiumNameSizeClass(player.name)}>{player.name}</strong>
               <em>{player.score.toLocaleString()} pts</em>
             </article>
           ))}
@@ -1258,7 +1241,7 @@ function JoinQr({ url }) {
   return dataUrl ? <img className="join-qr" src={dataUrl} alt={`QR code for ${url}`} /> : null;
 }
 
-function Host({ socket, setTheme }) {
+function Host({ socket }) {
   const [quiz, setQuiz] = useState(() => {
     try {
       const saved = localStorage.getItem("couch-quiz-draft");
@@ -1295,8 +1278,32 @@ function Host({ socket, setTheme }) {
   }, [quiz]);
 
   useEffect(() => {
-    setTheme(room?.theme || quiz.theme);
-  }, [quiz.theme, room?.theme, setTheme]);
+    const handleSpacebar = (event) => {
+      if (event.code !== "Space" || event.repeat || !room) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.matches("input, textarea, select") || target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (room.phase === "lobby" && room.players.length) {
+        event.preventDefault();
+        primeAudio();
+        socket.emit("host:start", { code: room.code });
+      } else if (room.phase === "question") {
+        event.preventDefault();
+        socket.emit("host:reveal", { code: room.code });
+      } else if (["results", "leaderboard"].includes(room.phase)) {
+        event.preventDefault();
+        socket.emit("host:next", { code: room.code });
+      }
+    };
+
+    window.addEventListener("keydown", handleSpacebar);
+    return () => window.removeEventListener("keydown", handleSpacebar);
+  }, [primeAudio, room, socket]);
 
   const createRoom = () => {
     primeAudio();
@@ -1318,10 +1325,6 @@ function Host({ socket, setTheme }) {
         <header className="setup__header">
           <Brand compact />
           <div className="setup__actions">
-            <ThemePicker
-              value={quiz.theme}
-              onChange={(theme) => setQuiz((current) => ({ ...current, theme }))}
-            />
             <a className="text-link" href="/play">
               Join instead
             </a>
@@ -1480,10 +1483,10 @@ function Host({ socket, setTheme }) {
   );
 }
 
-function Player({ socket, setTheme }) {
+function Player({ socket }) {
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const [code, setCode] = useState(() => formatCode(params.get("room") || ""));
-  const [name, setName] = useState(() => localStorage.getItem("couch-quiz-name") || "");
+  const [name, setName] = useState(() => (localStorage.getItem("couch-quiz-name") || "").slice(0, 15));
   const [room, setRoom] = useState(null);
   const [player, setPlayer] = useState(null);
   const [error, setError] = useState("");
@@ -1498,11 +1501,12 @@ function Player({ socket, setTheme }) {
     setError("");
     setJoining(true);
     const normalizedCode = code.replace(/\D/g, "");
+    const normalizedName = name.trim().slice(0, 15);
     const playerKey = localStorage.getItem(`couch-quiz-player-${normalizedCode}`);
-    socket.emit("player:join", { code: normalizedCode, name, playerKey }, (response) => {
+    socket.emit("player:join", { code: normalizedCode, name: normalizedName, playerKey }, (response) => {
       setJoining(false);
       if (!response?.ok) return setError(response?.error || "Could not join.");
-      localStorage.setItem("couch-quiz-name", name.trim());
+      localStorage.setItem("couch-quiz-name", normalizedName);
       localStorage.setItem(`couch-quiz-player-${normalizedCode}`, response.playerKey);
     });
   };
@@ -1517,10 +1521,6 @@ function Player({ socket, setTheme }) {
       socket.off("player:state", onPlayerState);
     };
   }, [socket]);
-
-  useEffect(() => {
-    if (room?.theme) setTheme(room.theme);
-  }, [room?.theme, setTheme]);
 
   if (!room || !player) {
     return (
@@ -1544,7 +1544,7 @@ function Player({ socket, setTheme }) {
             <input
               autoComplete="nickname"
               placeholder="Maya"
-              maxLength={20}
+              maxLength={15}
               value={name}
               onChange={(event) => setName(event.target.value)}
             />
@@ -1676,18 +1676,13 @@ function PlayerHeader({ player, rank }) {
 }
 
 export default function App({ socket }) {
-  const [theme, setTheme] = useState(() => localStorage.getItem("couch-quiz-theme") || "premium");
-  useEffect(() => {
-    localStorage.setItem("couch-quiz-theme", theme);
-  }, [theme]);
-
   const path = window.location.pathname;
   return (
-    <div className={`app-theme app-theme--${theme}`}>
+    <div className="app-theme app-theme--cupertino">
       {path.startsWith("/host") ? (
-        <Host socket={socket} setTheme={setTheme} />
+        <Host socket={socket} />
       ) : path.startsWith("/play") ? (
-        <Player socket={socket} setTheme={setTheme} />
+        <Player socket={socket} />
       ) : (
         <Home />
       )}

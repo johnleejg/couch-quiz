@@ -2315,34 +2315,6 @@ select option {
   gap: 0.8rem;
 }
 
-.theme-picker {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  min-height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
-  padding: 3px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-
-.theme-picker button {
-  min-width: 96px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.9rem;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.theme-picker button.is-active {
-  background: var(--accent-gradient);
-  color: white;
-  box-shadow: 0 8px 22px rgba(59, 130, 246, 0.24);
-}
-
 .app-theme--cupertino {
   --ink: #101418;
   --cream: #f8fafc;
@@ -2477,29 +2449,6 @@ select option {
 .app-theme--cupertino .text-button {
   color: #007aff;
   font-weight: 650;
-}
-
-.app-theme--cupertino .theme-picker {
-  border-color: rgba(60, 60, 67, 0.18);
-  border-radius: 10px;
-  background: rgba(118, 118, 128, 0.16);
-  padding: 2px;
-  box-shadow: none;
-  backdrop-filter: blur(22px) saturate(1.4);
-}
-
-.app-theme--cupertino .theme-picker button {
-  min-height: 28px;
-  color: rgba(60, 60, 67, 0.82);
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-
-.app-theme--cupertino .theme-picker button.is-active {
-  border: 0.5px solid rgba(0, 0, 0, 0.06);
-  background: #007aff;
-  color: white;
-  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.14);
 }
 
 .app-theme--cupertino .setup {
@@ -3045,10 +2994,6 @@ select option {
     flex-direction: column;
   }
 
-  .theme-picker button {
-    min-width: 82px;
-  }
-
   .app-theme--cupertino .setup {
     padding: 0.75rem;
   }
@@ -3275,6 +3220,10 @@ select option {
 
 .podium-card {
   display: grid;
+  box-sizing: border-box;
+  min-width: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-self: end;
   gap: 0.35rem;
   justify-items: center;
   border: 1px solid var(--line);
@@ -3292,15 +3241,23 @@ select option {
 }
 
 .podium-card--rank-3 {
+  height: 172px;
+  grid-column: 3;
+  grid-row: 1;
   animation-delay: 200ms;
 }
 
 .podium-card--rank-2 {
+  height: 196px;
+  grid-column: 1;
+  grid-row: 1;
   animation-delay: 950ms;
 }
 
 .podium-card--rank-1 {
-  min-height: 210px;
+  height: 228px;
+  grid-column: 2;
+  grid-row: 1;
   animation-delay: 1700ms;
   transform: translateY(26px) scale(1);
 }
@@ -3314,8 +3271,15 @@ select option {
 }
 
 .podium-card strong {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  align-self: center;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   font-size: clamp(1.6rem, 4vw, 3.2rem);
-  line-height: 1;
+  line-height: 1.02;
+  text-align: center;
 }
 
 .podium-card em {
@@ -3330,6 +3294,22 @@ select option {
   -webkit-background-clip: text;
   color: transparent;
   font-size: clamp(2.4rem, 6vw, 4.5rem);
+}
+
+.podium-card--rank-2 strong {
+  font-size: clamp(1.95rem, 4.7vw, 3.75rem);
+}
+
+.podium-card--rank-3 strong {
+  font-size: clamp(1.45rem, 3.25vw, 2.65rem);
+}
+
+.podium-card strong.podium-card__name--long {
+  font-size: clamp(1.3rem, 2.25vw, 2rem);
+}
+
+.podium-card strong.podium-card__name--compact {
+  font-size: clamp(1.05rem, 1.65vw, 1.5rem);
 }
 
 .podium__next-seven {
@@ -3402,6 +3382,13 @@ select option {
   .round-results__intro,
   .podium__top-three {
     grid-template-columns: 1fr;
+  }
+
+  .podium-card--rank-1,
+  .podium-card--rank-2,
+  .podium-card--rank-3 {
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .quiz-library__header,
@@ -4320,6 +4307,41 @@ select option {
 
   .player-header {
     flex: 0 0 auto;
+  }
+
+  .player-screen .player-header .brand {
+    flex: 0 1 42%;
+    min-width: 0;
+    font-size: clamp(1.65rem, 8vw, 3.1rem);
+  }
+
+  .player-screen .player-header > div:last-child {
+    display: grid;
+    min-width: 0;
+    max-width: 54%;
+    flex: 0 1 54%;
+    justify-items: end;
+    text-align: right;
+  }
+
+  .player-screen .player-header > div:last-child strong,
+  .player-screen .player-header > div:last-child span {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    text-align: right;
+  }
+
+  .player-screen .player-header > div:last-child strong {
+    font-size: clamp(1.05rem, 5.7vw, 2rem);
+    line-height: 0.98;
+  }
+
+  .player-screen .player-header > div:last-child span {
+    font-size: clamp(0.8rem, 3.8vw, 1.15rem);
+    line-height: 1.05;
   }
 
   .waiting-card,

@@ -174,7 +174,6 @@ const normalizeQuiz = (rawQuiz) => {
   if (!rawQuestions.length) throw new Error("Add at least one question.");
   return {
     title: String(rawQuiz?.title || "Friday Night Trivia").trim().slice(0, 60),
-    theme: rawQuiz?.theme === "cupertino" ? "cupertino" : "premium",
     questions: rawQuestions.map(normalizeQuestion),
   };
 };
@@ -295,7 +294,6 @@ const publicState = (room) => {
     code: room.code,
     joinUrl: room.joinUrl,
     title: room.quiz.title,
-    theme: room.quiz.theme,
     phase: room.phase,
     questionIndex: room.questionIndex,
     questionCount: room.quiz.questions.length,
@@ -567,7 +565,7 @@ io.on("connection", (socket) => {
 
   socket.on("player:join", ({ code: rawCode, name: rawName, playerKey }, respond) => {
     const code = String(rawCode || "").replace(/\D/g, "");
-    const name = String(rawName || "").trim().slice(0, 20);
+    const name = String(rawName || "").trim().slice(0, 15);
     const room = rooms.get(code);
     if (!room) return respond?.({ ok: false, error: "That room does not exist." });
     if (!name) return respond?.({ ok: false, error: "Enter a name first." });
